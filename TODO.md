@@ -1,5 +1,10 @@
 # TODO
 
+- [ ] Test the automatic shake (`turn.complete`, usage >= 60%) once on a
+  session copy. Only the manual `/compact shake` has run live. The user-scope
+  install turns it on in every session; until it passes, lower
+  `thresholdPercent` only on a copy, or disable the plugin for work sessions if
+  they approach 60%.
 - [ ] `/shake` command: register `/shake`, return at once, and queue
   `$.command.run({ command: 'compact', args: 'shake' })` after the hook returns
   (e.g. `setTimeout(..., 0)`). The engine refuses `$.session.compact()` and

@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Copy a session to a new session id in the same project dir, for a manual shake test.
+
+usage: shake-fork SESSION-ID-OR-PATH
+
+Each line keeps its bytes except the "sessionId" value. cost-state rows are left
+out: a resumed session adds its stored cost to the new run's total (bench.py fork).
+The source file is only read; its sha256 is checked before and after.
+
+Claude Code finds a session by the project directory of the cwd it is resumed
+from, which is the directory the session started in. So the printed command
+uses the cwd of the first row that has one, not the last.
+"""
+import hashlib
+import json
+import os
+import re
+import shlex
+import sys
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from shake_io import Refused, session_path  # noqa: E402
+
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def fork(source):
+    before = sha256(source)
+    with open(source, "rb") as f:
+        lines = f.read().split(b"\n")
+    old_id = os.path.basename(source)[: -len(".jsonl")]
+    new_id = str(uuid.uuid4())
+    old_field, new_field = f'"sessionId":"{old_id}"'.encode(), f'"sessionId":"{new_id}"'.encode()
+    out, cwd = [], None
+    for line in lines[:-1] if lines and lines[-1] == b"" else lines:
+        row = json.loads(line)
+        if row.get("type") == "cost-state":
+            continue
+        cwd = cwd or row.get("cwd")
+        out.append(line.replace(old_field, new_field) if row.get("sessionId") == old_id else line)
+    target = os.path.join(os.path.dirname(source), new_id + ".jsonl")
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(b"".join(line + b"\n" for line in out))
+    if sha256(source) != before:
+        raise Refused("source session changed during the fork", source=source)
+    return new_id, target, cwd, before
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    new_id, target, cwd, digest = fork(session_path(sys.argv[1]))
+    print(f"source sha256 (unchanged): {digest}")
+    print(f"fork: {target}")
+    if cwd and re.sub(r"[^A-Za-z0-9]", "-", cwd) != os.path.basename(os.path.dirname(target)):
+        print("warning: the first cwd does not map to this project directory; resume from the directory that does")
+    print(f"cd {shlex.quote(cwd or '.')} && claude --resume {new_id} --plugin-dir {shlex.quote(PLUGIN_DIR)}")

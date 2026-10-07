@@ -1,0 +1,6 @@
+{
+  "name": "shake",
+  "version": "0.1.0",
+  "description": "Shrink a long session by replacing old tool results with saved-file placeholders during compaction",
+  "author": { "name": "Taras Serhiichuk" }
+}

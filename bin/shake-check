@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Report on a session .jsonl the way Claude Code 2.1.293 would load it (best effort).
+
+usage: shake-check SESSION.jsonl
+
+Mirrors the loader steps read in the binary: the >5 MiB pre-boundary cut (nOn),
+the anchor relink and pre-boundary delete (g1r), the parent walk (MSt) and the
+recovery of split rows by message.id and tool_use_id (S1r). Not mirrored: the
+timestamp fallback for a missing parent, and the non-message children (y1r).
+"""
+import collections
+import json
+import os
+import re
+import sys
+
+SKIP_PRECOMPACT_BYTES = 5 * 1024 * 1024
+SHAKEN = ("[shaken:", "<persisted-output>", "<truncated-output>")
+SAVED_PATH = re.compile(r"(?:Full output saved to: |original output saved at )(\S+?)(?=\.?\s|$)")
+
+
+def is_boundary(row):
+    return row.get("type") == "system" and row.get("subtype") == "compact_boundary"
+
+
+def anchors(row):
+    meta = row.get("compactMetadata") or {}
+    return meta.get("preservedMessages") or meta.get("preservedSegment")
+
+
+def blocks(row):
+    content = row.get("message", {}).get("content") if row.get("type") in ("user", "assistant") else None
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def load_map(rows, size):
+    if size > SKIP_PRECOMPACT_BYTES and not os.environ.get("CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP"):
+        cut = max((i for i, r in enumerate(rows) if is_boundary(r) and not anchors(r)), default=0)
+        rows = rows[cut:]
+    table, index = {}, {}
+    for i, row in enumerate(rows):
+        if row.get("uuid"):
+            table[row["uuid"]] = dict(row)
+            index[row["uuid"]] = i
+    return table, index
+
+
+def relink(table, index):
+    """g1r: returns a note when the anchors were not applied."""
+    last = anchored = -1
+    meta = None
+    for uid in table:
+        if is_boundary(table[uid]):
+            last = index[uid]
+            if anchors(table[uid]):
+                meta, anchored = table[uid]["compactMetadata"], index[uid]
+    if meta is None:
+        return "no anchored boundary"
+    preserved = None
+    if anchored == last:
+        preserved = meta.get("preservedMessages")
+        if preserved is None:
+            seg = meta["preservedSegment"]
+            walk, row = [], table.get(seg["tailUuid"])
+            while row and row["uuid"] not in walk:
+                walk.append(row["uuid"])
+                if row["uuid"] == seg["headUuid"]:
+                    preserved = {"anchorUuid": seg["anchorUuid"], "uuids": walk[::-1]}
+                    break
+                row = table.get(row.get("parentUuid"))
+            if preserved is None:
+                return "segment walk broken"
+    listed = preserved["uuids"] if preserved else []
+    if any(u not in table for u in listed):
+        return "listed uuid missing (tengu_relink_walk_broken)"
+    if listed:
+        parent = preserved["anchorUuid"]
+        for uid in listed:
+            table[uid]["parentUuid"] = parent
+            parent = uid
+        for uid, row in table.items():
+            if row.get("parentUuid") == preserved["anchorUuid"] and uid != listed[0]:
+                row["parentUuid"] = listed[-1]
+    keep = set(listed)
+    dropped = {u for u in table if index[u] < last and u not in keep}
+    for uid in dropped:
+        del table[uid]
+    if listed and dropped:
+        for row in table.values():
+            if row.get("type") in ("user", "assistant") and row.get("parentUuid") in dropped:
+                row["parentUuid"] = listed[-1]
+    return None if preserved else "anchors on an earlier boundary: pre-boundary rows dropped, nothing relinked"
+
+
+def chain(table):
+    leaf = None
+    for row in table.values():
+        if row.get("type") in ("user", "assistant") and not row.get("isSidechain"):
+            leaf = row
+    walked, seen, dangling = [], set(), 0
+    while leaf and leaf["uuid"] not in seen:
+        seen.add(leaf["uuid"])
+        walked.append(leaf)
+        parent = leaf.get("parentUuid")
+        if not parent:
+            break
+        if parent not in table:
+            dangling += 1
+            break
+        leaf = table[parent]
+    walked.reverse()
+    return walked, seen, dangling
+
+
+def recover(table, walked, seen):
+    """S1r: same message.id rows and their tool_result rows, then results by tool_use_id."""
+    by_message = collections.defaultdict(list)
+    results_by_parent = collections.defaultdict(list)
+    results_by_call = {}
+    for row in table.values():
+        if row.get("type") == "assistant" and row.get("message", {}).get("id"):
+            by_message[row["message"]["id"]].append(row)
+        elif row.get("type") == "user":
+            calls = [b.get("tool_use_id") for b in blocks(row) if b.get("type") == "tool_result"]
+            if calls:
+                results_by_parent[row.get("parentUuid")].append(row)
+            for call in calls:
+                results_by_call.setdefault(call, row)
+    loaded, have = list(walked), set(seen)
+
+    def add(row):
+        if row["uuid"] not in have:
+            have.add(row["uuid"])
+            loaded.append(row)
+
+    for row in walked:
+        if row.get("type") != "assistant" or not row.get("message", {}).get("id"):
+            continue
+        for sibling in by_message[row["message"]["id"]]:
+            add(sibling)
+            for result in results_by_parent.get(sibling["uuid"], []):
+                add(result)
+    answered = {b.get("tool_use_id") for r in loaded for b in blocks(r) if b.get("type") == "tool_result"}
+    for row in list(loaded):
+        for b in blocks(row):
+            if b.get("type") == "tool_use" and b.get("id") not in answered and b.get("id") in results_by_call:
+                add(results_by_call[b["id"]])
+    return loaded
+
+
+def duplicates(counter):
+    return sum(n - 1 for n in counter.values() if n > 1)
+
+
+def check(path):
+    rows, bad = [], 0
+    with open(path, "rb") as f:
+        data = f.read()
+    for line in data.split(b"\n"):
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            bad += 1
+    boundaries = [{"line": i + 1, "trigger": (r.get("compactMetadata") or {}).get("trigger"),
+                   "anchors": bool(anchors(r))} for i, r in enumerate(rows) if is_boundary(r)]
+    table, index = load_map(rows, len(data))
+    relink_note = relink(table, index)
+    walked, seen, dangling = chain(table)
+    loaded = recover(table, walked, seen)
+
+    message_blocks, tool_uses, tool_results = collections.Counter(), collections.Counter(), collections.Counter()
+    loaded_thinking = 0
+    for row in loaded:
+        for b in blocks(row):
+            if row["type"] == "assistant":
+                message_blocks[(row["message"].get("id"), json.dumps(b, sort_keys=True))] += 1
+            loaded_thinking += b.get("type") == "thinking"
+            if b.get("type") == "tool_use":
+                tool_uses[b.get("id")] += 1
+            elif b.get("type") == "tool_result":
+                tool_results[b.get("tool_use_id")] += 1
+
+    uuids = {r["uuid"] for r in rows if r.get("uuid")}
+    shaken, saved_paths = 0, set()
+    for row in rows:
+        for b in blocks(row):
+            if b.get("type") != "tool_result":
+                continue
+            content = b.get("content")
+            text = content if isinstance(content, str) else "".join(
+                c.get("text", "") for c in content or [] if isinstance(c, dict))
+            if text.lstrip().startswith(SHAKEN):
+                shaken += 1
+                saved_paths.update(SAVED_PATH.findall(text))
+    return {
+        "rows": len(rows),
+        "bad_lines": bad,
+        "bytes": len(data),
+        "boundaries": boundaries,
+        "loader": {
+            "relink": relink_note or "anchors applied",
+            "loaded_rows": len(loaded),
+            "chain_rows": len(walked),
+            "recovered_rows": len(loaded) - len(walked),
+            "duplicate_message_blocks": duplicates(message_blocks),
+            "duplicate_tool_use_ids": duplicates(tool_uses),
+            "duplicate_tool_result_ids": duplicates(tool_results),
+            "dangling_parent_on_walk": dangling,
+            "thinking_blocks": loaded_thinking,
+        },
+        "file": {
+            "dangling_parents": sum(1 for r in rows if r.get("parentUuid") and r["parentUuid"] not in uuids),
+            "thinking_blocks": sum(b.get("type") == "thinking" for r in rows for b in blocks(r)),
+            "shaken_results": shaken,
+            "saved_files_present": sum(os.path.isfile(p) for p in saved_paths),
+            "saved_files_missing": sum(not os.path.isfile(p) for p in saved_paths),
+        },
+    }
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    print(json.dumps(check(sys.argv[1]), indent=1))

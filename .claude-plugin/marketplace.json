@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-shake",
+  "description": "Local marketplace for the shake mod.",
+  "owner": { "name": "Taras Serhiichuk" },
+  "plugins": [
+    {
+      "name": "shake",
+      "description": "Shrink a long session by replacing old tool results with saved-file placeholders during compaction",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

@@ -19,6 +19,9 @@
     hook in `~/.claude/settings.json`, not from this mod; every compaction
     (native, Jev, shake) shows it. A hook can hide its output with
     `{"suppressOutput": true}`; whether that hides this line is unverified.
+- [ ] Skip the startup repair check when the session has no `shake/` dir
+  (review 3, P3: about 15 ms of subprocess time on the first prompt of every
+  session).
 - [ ] Explain why a resumed session is 10-15k tokens larger than the live one
   after a shake (attachment rows? thinking counted after load?).
 - [ ] Check that the 3 s repair timeout is enough on a slow disk; the live tests

@@ -22,6 +22,12 @@
 - [ ] Skip the startup repair check when the session has no `shake/` dir
   (review 3, P3: about 15 ms of subprocess time on the first prompt of every
   session).
+- [ ] Check prompt cache invalidation: measure the cache write on the first
+  request after a shake (`cache_creation_input_tokens`) and the cost per shake.
+  Find the break-even point against keeping the full history.
+- [ ] Check whether to set `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`: its
+  default and effect are untested. A Read cap limits new large reads, which
+  the shake frees only later.
 - [ ] Explain why a resumed session is 10-15k tokens larger than the live one
   after a shake (attachment rows? thinking counted after load?).
 - [ ] Check that the 3 s repair timeout is enough on a slow disk; the live tests

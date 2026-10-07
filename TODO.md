@@ -45,6 +45,6 @@
 - [ ] Optional: the idle file shake + mod-queued `/resume <same id>` route
   (ADR-0003) as a fallback that keeps attachment rows.
 
-Research and reviews are in `docs/research/` (copies of the artifact files from
-2026-10-07/08; `adr-0003-shake.md` is a copy of
-`~/Repos/agents/docs/decisions/0003-shake-session-file-at-idle.md`).
+Decisions: [ADR-0003](../agents/docs/decisions/0003-shake-session-file-at-idle.md)
+in the `agents` repo (see README "Decisions"). Frozen research and review copies
+from 2026-10-07/08 are in `docs/research/`.

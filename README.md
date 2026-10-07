@@ -10,6 +10,19 @@ shaken history without duplicates.
 The plugin name is `shake`, because Claude Code reserves names that start with
 `claude-`.
 
+## Decisions
+
+The design decisions live in the `agents` repo, not here. These links assume
+both repos are checked out side by side under `~/Repos`.
+
+- [ADR-0003: shake route and all facts it depends on](../agents/docs/decisions/0003-shake-session-file-at-idle.md)
+  ([GitHub](https://github.com/serhiichuk/agents/blob/main/docs/decisions/0003-shake-session-file-at-idle.md))
+- [ADR-0001: the earlier rejection of an in-place shake](../agents/docs/decisions/0001-no-in-place-shake-plugin.md)
+  ([GitHub](https://github.com/serhiichuk/agents/blob/main/docs/decisions/0001-no-in-place-shake-plugin.md))
+
+`docs/research/` holds frozen copies of the reports and reviews the ADR cites.
+Update the ADR, not the copies.
+
 ## How it works
 
 - **Trigger.** After each main-loop turn that ends with an answer, the mod reads

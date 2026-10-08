@@ -84,10 +84,19 @@ Update the ADR, not the copies.
 
 ## Install
 
-Load the plugin for one session:
+Install from GitHub (the repo is private, so git must have access to it):
 
 ```sh
-claude --plugin-dir /Users/serhiichuk/Repos/claude-shake
+claude plugin marketplace add serhiichuk/claude-shake
+claude plugin install shake@claude-shake
+```
+
+To get a new version, run `claude plugin marketplace update claude-shake`.
+
+Load the plugin from a local clone for one session:
+
+```sh
+claude --plugin-dir /path/to/claude-shake
 ```
 
 `$.session.compact()` works only in the interactive terminal UI. In `-p` and

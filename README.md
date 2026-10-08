@@ -84,7 +84,7 @@ Update the ADR, not the copies.
 
 ## Install
 
-Install from GitHub (the repo is private, so git must have access to it):
+Install from GitHub:
 
 ```sh
 claude plugin marketplace add serhiichuk/claude-shake

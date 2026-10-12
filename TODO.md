@@ -1,22 +1,14 @@
 # TODO
 
-- [ ] Test the automatic shake (`turn.complete`, usage >= 60%) once on a
-  session copy. Only the manual `/compact shake` has run live. The user-scope
-  install turns it on in every session; until it passes, lower
-  `thresholdPercent` only on a copy, or disable the plugin for work sessions if
-  they approach 60%.
-- [ ] Test the floor fix and `/shake` live. A manual `/compact shake` now has
-  no floor (`e.trigger === 'manual'`). `/shake` queues `/compact shake` from
-  `$.clock.after(0, ...)`, because the engine refuses `$.command.run` inside
-  the command's own hook. Unverified:
-  - that the queued run is not refused;
-  - that a plugin-queued `/compact` arrives with `trigger: 'manual'` (if it
-    arrives as `plugin`, the floor applies to `/shake`);
-  - that `return {}` shows no empty output row.
-
-  The auto trigger keeps `floorShare` for the floor and its retry gate
-  (`retryAboveTokens`). Before a lower auto floor, get the cache cost per
-  shake (see the cache item below).
+- [ ] Choose the auto shake rule from the cache cost
+  (`~/.agents/artifacts/claude-shake/main/20261012-cache-cost-per-shake.md`):
+  a shake costs a 2x cache write of what stays, so the break-even is about
+  `20 x kept / freed` requests. The 15% floor does not measure that. Options:
+  - shake only on a cold cache (first prompt after a pause longer than the TTL);
+  - a payback floor (for example, freed >= kept);
+  - leave it to the engine's `auto` trigger.
+- [ ] Check whether `return {}` from `/shake` shows an empty output row (the
+  screen did not render cleanly in the 2026-10-12 test).
 - [ ] Transcript noise after a shake:
   - the queued `/shake-repair` shows as a typed command plus an empty
     `shake+plannotator:` answer (the label lists every plugin that hooks
@@ -30,15 +22,6 @@
 - [ ] Skip the startup repair check when the session has no `shake/` dir
   (review 3, P3: about 15 ms of subprocess time on the first prompt of every
   session).
-- [ ] Check prompt cache invalidation: measure the cache write on the first
-  request after a shake (`cache_creation_input_tokens`) and the cost per shake.
-  Find the break-even point against keeping the full history.
-  Cache TTL facts (scout report, 2026-10-12, from
-  https://code.claude.com/docs/en/prompt-caching.md, not re-read): on a
-  subscription the main loop gets 1 h and subagents get 5 min. Overrides:
-  `promptCacheTtl` / `CLAUDE_CODE_PROMPT_CACHE_TTL` and
-  `subagentPromptCacheTtl` / `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` (`5m` or
-  `1h`). A 1 h write costs 2x base input, a 5 min write 1.25x.
 - [ ] Check whether to set `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`: its
   default and effect are untested. A Read cap limits new large reads, which
   the shake frees only later.
@@ -49,9 +32,8 @@
 - [ ] Test `/rewind` and fork from a row before a shake boundary.
 - [ ] Check storage v5 (`replaceRecords`) sessions; the repair assumes the plain
   JSONL file.
-- [ ] Headless (`-p`) sessions: `$.session.compact()` is refused there; only
-  `/compact shake` works. Decide whether the auto trigger should queue
-  `/compact shake` in headless mode.
+- [ ] Headless (`-p`) sessions: check that the auto trigger's queued
+  `/compact shake auto` runs there.
 - [ ] Re-check the loader facts (`g1r`, `S1r`, `nOn`, `zKr`) after each Claude
   Code update; the mod depends on an undocumented file format.
 - [ ] Upstream request: expose `content-replacement` (flag

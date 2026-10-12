@@ -11,6 +11,7 @@ export const CONFIG = {
 export type Config = typeof CONFIG
 
 export const SHAKE_INSTRUCTIONS = 'shake'
+export const AUTO_SHAKE_INSTRUCTIONS = 'shake auto'
 
 const PREVIEW_CHARS = 500
 const PLACEHOLDER_OVERHEAD_CHARS = PREVIEW_CHARS + 300

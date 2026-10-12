@@ -26,14 +26,16 @@ Update the ADR, not the copies.
 ## How it works
 
 - **Trigger.** After each main-loop turn that ends with an answer, the mod reads
-  the context usage. If the usage is at or above the threshold, it calls
-  `$.session.compact({ instructions: 'shake' })`. The engine also raises
+  the context usage. If the usage is at or above the threshold, it queues
+  `/compact shake auto` with `$.command.run`. (`$.session.compact()` skips the
+  calling plugin's own `session.compact` hook, so it would start a native
+  summary compaction.) The engine also raises
   `session.compact` for its own auto-compaction, and the mod handles that too.
   For a manual shake, type `/shake` (it queues `/compact shake`) or
   `/compact shake`.
 - **Shake** (`session.compact` hook). The mod acts on `/compact shake`, on its
-  own trigger and on `auto`. It skips `precompute`, subagent and fork
-  transcripts, and a plain `/compact`.
+  own trigger (`/compact shake auto`) and on `auto`. It skips `precompute`,
+  subagent and fork transcripts, and a plain `/compact`.
   - The newest tool output (16k tokens) stays as it is.
   - An older tool result larger than 2,000 characters is saved to
     `<project dir>/<session id>/shake/<tool_use_id>.txt` (file mode 600,
@@ -101,9 +103,7 @@ Load the plugin from a local clone for one session:
 claude --plugin-dir /path/to/claude-shake
 ```
 
-`$.session.compact()` works only in the interactive terminal UI. In `-p` and
-SDK sessions, only `/compact shake` and the engine's auto-compaction reach the
-hook.
+`--plugin-dir` overrides an installed copy of the same plugin for that session.
 
 ## Config
 
@@ -182,8 +182,6 @@ session):
 
 ## Known limits
 
-- `$.session.compact()` is available only in the TUI. Headless sessions refuse
-  it; there, use `/compact shake` or rely on auto-compaction.
 - A changed user message loses its engine handle. Its attachment rows and its
   `toolUseResult` record are not written again (measured: 34 to 23 attachment
   rows in the research run).

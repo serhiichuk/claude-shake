@@ -1,6 +1,7 @@
 import type { EngineInterface, Register, ToolResultSummary } from 'claude-code'
 
 import {
+  AUTO_SHAKE_INSTRUCTIONS,
   CONFIG,
   SHAKE_INSTRUCTIONS,
   estimatedTokens,
@@ -103,8 +104,8 @@ export const register: Register = on => {
       const { context } = await $.session.usage()
       const tokens = context.tokens ?? 0
       if ((context.percent ?? 0) < CONFIG.thresholdPercent || tokens < retryAboveTokens) return
-      const compacted = await $.session.compact({ instructions: SHAKE_INSTRUCTIONS })
-      retryAboveTokens = compacted.skip === undefined ? 0 : tokens * (1 + CONFIG.floorShare)
+      // $.session.compact() skips this plugin's own session.compact hook; a queued /compact reaches it.
+      await $.command.run({ command: 'compact', args: AUTO_SHAKE_INSTRUCTIONS })
     })()
       .catch(error => $.ui.log(`auto shake failed: ${String(error)}`, { to: 'debug' }))
       .finally(() => {
@@ -114,13 +115,15 @@ export const register: Register = on => {
   })
 
   on('session.compact', async ($, e, next) => {
-    const isOurs = e.instructions === SHAKE_INSTRUCTIONS
+    const isAuto = e.instructions === AUTO_SHAKE_INSTRUCTIONS
+    const isOurs = isAuto || e.instructions === SHAKE_INSTRUCTIONS
     if (e.agentId || e.trigger === 'precompute' || !(isOurs || e.trigger === 'auto')) return next(e)
     const since = await $.clock.now()
     const old = selectOld(e.messages)
     const used = (await $.session.usage()).context.tokens ?? estimatedTokens(e.messages)
     const freed = freedTokens(old)
-    if (e.trigger !== 'manual' && freed < CONFIG.floorShare * used) {
+    if (isAuto) retryAboveTokens = used * (1 + CONFIG.floorShare)
+    if ((isAuto || e.trigger !== 'manual') && freed < CONFIG.floorShare * used) {
       if (!isOurs) return next(e)
       return { skip: `shake: a shake frees about ${Math.round(freed)} tokens, below the floor` }
     }
@@ -133,6 +136,7 @@ export const register: Register = on => {
     }
     isRepairPending = true
     timeoutRetries = 0
+    retryAboveTokens = 0
     void $.command.run({ command: 'shake-repair' }).catch(() => {
       isRepairPending = true
     })

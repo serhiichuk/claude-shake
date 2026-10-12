@@ -1,17 +1,17 @@
 # TODO
 
-- [ ] Check whether `return {}` from `/shake` shows an empty output row (the
-  screen did not render cleanly in the 2026-10-12 test).
-- [ ] Transcript noise after a shake:
-  - the queued `/shake-repair` shows as a typed command plus an empty
-    `shake+plannotator:` answer (the label lists every plugin that hooks
-    `command.run`). Try returning `{}` (no `text`), or drop the command and run
-    the repair from a timer after the `session.compact` hook returns
-    (`prompt.submit` already waits for a running repair). Untested.
-  - the `PostCompact` line with the long shell command comes from Orca's agent
-    hook in `~/.claude/settings.json`, not from this mod; every compaction
-    (native, Jev, shake) shows it. A hook can hide its output with
-    `{"suppressOutput": true}`; whether that hides this line is unverified.
+- [ ] Transcript noise that the mod cannot remove:
+  - a queued shake shows the `/compact shake …` row and the engine's
+    `Compacted (ctrl+o to see full summary)` line. `$.session.compact()` would
+    avoid both, but called under a hook's work (a command, a turn) the engine
+    skips the plugin's own `session.compact` hook and its `.catch`, and core
+    then writes a native summary (live test 2026-10-12). Retry if the engine
+    asks the `.catch` on re-entry.
+  - the `PostCompact` line with the long shell command comes from Orca's
+    `~/.orca/agent-hooks/claude-hook.sh`, which prints `{}`; every compaction
+    shows it. A fix belongs in Orca (print `{"suppressOutput": true}`;
+    unverified).
+- [ ] Check whether `return {}` from `/shake` shows an empty output row.
 - [ ] Skip the startup repair check when the session has no `shake/` dir
   (review 3, P3: about 15 ms of subprocess time on the first prompt of every
   session).

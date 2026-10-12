@@ -32,7 +32,9 @@ Update the ADR, not the copies.
   native summary compaction.)
 - **Idle shake.** After each main-loop turn, and when a session starts or
   resumes, the mod starts a timer that ends when the prompt cache expires: the
-  time of the last main-loop request plus the cache lifetime. A new prompt
+  time of the last main-loop request plus 1.5 times the cache lifetime (90
+  minutes for the 1 h cache, as in omp; the margin keeps a shake off a cache
+  that is still warm). A new prompt
   stops it. When it fires, the next request writes the whole cache in any case,
   so the mod queues `/compact shake idle` with no floor, if any tool result is
   old enough. On a resume after a longer pause, the timer fires at once.
@@ -66,9 +68,14 @@ Update the ADR, not the copies.
     again (measured: only the system prompt and tools, about 24k tokens, stay
     cached). The break-even is about `20 x kept / freed` requests with the 1 h
     cache.
-- **Anchor repair** (`/shake-repair`). The shake hook queues this command. It
-  runs when the session is idle. An idle `prompt.submit` runs the same repair
-  after a load, after a failed queue and once after a timeout. It also waits
+- **Status line.** After a shake, the mod writes one dim transcript line that
+  the model does not read: `Shook N tool results (~X tokens freed).`, as omp
+  shows it. A requested shake that does not run shows the reason in the
+  engine's `Not compacted · …` line. An automatic shake below the floor is not
+  queued, so it shows nothing.
+- **Anchor repair.** The shake hook starts the repair on a timer after it
+  returns; `/shake-repair` runs the same repair by hand. An idle
+  `prompt.submit` runs the same repair after a load and once after a timeout. It also waits
   for a repair that is still running, so no turn starts during a rewrite. A
   prompt waits at most about 3 s plus the rewrite. After a refusal, or after
   a second timeout, the mod gives up on that boundary and shows a toast. The
@@ -171,10 +178,10 @@ Each step that sends a prompt to the model costs API tokens.
 4. Run the printed command. Expected: the session opens with no plugin error
    line. `claude --debug` shows the plugin's lines in the debug log.
 5. Run `/context` and note the used tokens.
-6. Type `/compact shake`. Expected: a toast `shake: replaced N old tool
-   results` and a "Compacted" notice, or one line that says the shake is below
-   the floor.
-7. Wait 1 second. The queued `/shake-repair` runs by itself.
+6. Type `/shake`. Expected: a "Compacted" notice and the dim line
+   `Shook N tool results (~X tokens freed).`, or `Not compacted · Nothing to
+   shake.`
+7. Wait 1 second. The repair runs by itself.
 8. In a second terminal, run `bin/shake-check <fork path>`. Expected:
    - the last boundary has `"anchors": true`;
    - `loader.relink` is `anchors applied`;
@@ -189,7 +196,7 @@ Each step that sends a prompt to the model costs API tokens.
     Expected: it reads the full original output.
 13. Optional, for the automatic trigger: set `thresholdTokens` to a value
     under the current usage, and send one prompt. Expected:
-    after the answer, the same toast and notice as in step 6.
+    after the answer, the same notice and line as in step 6.
 14. Remove the fork when done: the fork `.jsonl` file and the
     `<project dir>/<new id>/` directory.
 

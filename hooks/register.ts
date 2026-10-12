@@ -17,6 +17,8 @@ type RepairExpectation = { since: number; toolIds: string[] }
 const REPAIR_TIMEOUT_SECONDS = 3
 const REPAIR_TIMEOUT_RETRIES = 1
 const DEFAULT_CACHE_TTL_MINUTES = 60
+// Waits past the TTL with a margin, as omp does (90 min for the 1 h TTL): a shake on a still-warm cache pays a full cache write.
+const CACHE_EXPIRY_MARGIN = 1.5
 
 const runHelper = async ($: EngineInterface, args: string[], stdin?: string) =>
   $.process.run(['python3', `${$.plugin.root}/bin/shake_io.py`, ...args], { stdin, timeoutMs: 60_000 })
@@ -92,7 +94,7 @@ const armIdleShake = async ($: EngineInterface, config: Config, lastRequestMs?: 
   const since = lastRequestMs ?? cache.lastRequestMs
   if (since === null) return
   const ttlMinutes = config.cacheTtlMinutes || cache.ttlMinutes || DEFAULT_CACHE_TTL_MINUTES
-  const delay = Math.max(0, since + ttlMinutes * 60_000 - (await $.clock.now()))
+  const delay = Math.max(0, since + ttlMinutes * CACHE_EXPIRY_MARGIN * 60_000 - (await $.clock.now()))
   if (arming !== idleArmings) return
   idleShake = $.clock.after(delay, () => {
     void (async () => {
@@ -100,12 +102,14 @@ const armIdleShake = async ($: EngineInterface, config: Config, lastRequestMs?: 
     })().catch(error => $.ui.log(`idle shake failed: ${String(error)}`, { to: 'debug' }))
   })
 }
+
+const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
+
 const logIdleError = ($: EngineInterface) => (error: unknown) =>
   $.ui.log(`idle shake timer failed: ${String(error)}`, { to: 'debug' })
 
 export const register: Register = (on, options) => {
   const config = { ...CONFIG, ...options } as Config
-
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -148,6 +152,11 @@ export const register: Register = (on, options) => {
     void (async () => {
       const tokens = (await $.session.usage()).context.tokens ?? 0
       if (tokens < config.thresholdTokens || tokens < retryAboveTokens) return
+      // Checked before the queue too, so a shake below the floor leaves no /compact row in the transcript.
+      if (freedTokens(selectOld(await $.session.messages())) < config.floorShare * tokens) {
+        retryAboveTokens = tokens * (1 + config.floorShare)
+        return
+      }
       await queueShake($, AUTO_SHAKE_INSTRUCTIONS)
     })()
       .catch(error => $.ui.log(`auto shake failed: ${String(error)}`, { to: 'debug' }))
@@ -166,12 +175,13 @@ export const register: Register = (on, options) => {
     const used = (await $.session.usage()).context.tokens ?? estimatedTokens(e.messages)
     const freed = freedTokens(old)
     if (isAuto) retryAboveTokens = used * (1 + config.floorShare)
+    if (old.length === 0) return isOurs ? { skip: 'Nothing to shake.' } : next(e)
     if ((isAuto || e.trigger !== 'manual') && freed < config.floorShare * used) {
       if (!isOurs) return next(e)
-      return { skip: `shake: a shake frees about ${Math.round(freed)} tokens, below the floor` }
+      return { skip: `Shake skipped: ~${Math.round(freed)} tokens to free, below the floor.` }
     }
     const savedPaths = await saveOriginals($, since, old)
-    if (savedPaths.size === 0) return isOurs ? { skip: 'shake: no tool result could be saved' } : next(e)
+    if (savedPaths.size === 0) return isOurs ? { skip: 'Shake failed: no tool result could be saved.' } : next(e)
     const messages = replaceResults(e.messages, savedPaths)
     expectation = {
       since,
@@ -180,10 +190,13 @@ export const register: Register = (on, options) => {
     isRepairPending = true
     timeoutRetries = 0
     retryAboveTokens = 0
-    void $.command.run({ command: 'shake-repair' }).catch(() => {
-      isRepairPending = true
+    const freedNow = freedTokens(old.filter(result => savedPaths.has(result.tool_use_id)))
+    const status = `Shook ${plural(savedPaths.size, 'tool result')} (~${Math.round(freedNow)} tokens freed).`
+    // After the compaction is drawn, so the line lands below it; prompt.submit waits for a repair still running.
+    $.clock.after(0, () => {
+      $.ui.log(status)
+      void repair($)
     })
-    $.ui.toast(`shake: replaced ${savedPaths.size} old tool results`)
     return { messages }
   })
 }

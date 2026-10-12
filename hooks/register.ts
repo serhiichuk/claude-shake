@@ -16,6 +16,7 @@ type RepairExpectation = { since: number; toolIds: string[] }
 
 const REPAIR_TIMEOUT_SECONDS = 3
 const REPAIR_TIMEOUT_RETRIES = 1
+const DEFAULT_CACHE_TTL_MINUTES = 60
 
 const runHelper = async ($: EngineInterface, args: string[], stdin?: string) =>
   $.process.run(['python3', `${$.plugin.root}/bin/shake_io.py`, ...args], { stdin, timeoutMs: 60_000 })
@@ -38,6 +39,7 @@ let repairing: Promise<void> | undefined
 let retryAboveTokens = 0
 let timeoutRetries = 0
 let idleShake: Timer | undefined
+let idleArmings = 0
 
 const settleRepair = ($: EngineInterface, exitCode: number): void => {
   if (exitCode === 2 && timeoutRetries < REPAIR_TIMEOUT_RETRIES) {
@@ -73,8 +75,37 @@ const repair = ($: EngineInterface): Promise<void> =>
 const queueShake = ($: EngineInterface, instructions: string): Promise<unknown> =>
   $.command.run({ command: 'compact', args: instructions })
 
+type CacheState = { lastRequestMs: number | null; ttlMinutes: number | null }
+
+const readCache = async ($: EngineInterface): Promise<CacheState> => {
+  const run = await runHelper($, ['cache', await $.session.id()])
+  if (run.exitCode !== 0) throw new Error('shake could not read the session cache state', { cause: run })
+  return JSON.parse(run.stdout) as CacheState
+}
+
+// Fires when the prompt cache expires: then the next request writes it whole anyway, so a shake is free.
+const armIdleShake = async ($: EngineInterface, config: Config, lastRequestMs?: number): Promise<void> => {
+  const arming = ++idleArmings
+  idleShake?.cancel()
+  if (!config.idleShake) return
+  const cache = await readCache($)
+  const since = lastRequestMs ?? cache.lastRequestMs
+  if (since === null) return
+  const ttlMinutes = config.cacheTtlMinutes || cache.ttlMinutes || DEFAULT_CACHE_TTL_MINUTES
+  const delay = Math.max(0, since + ttlMinutes * 60_000 - (await $.clock.now()))
+  if (arming !== idleArmings) return
+  idleShake = $.clock.after(delay, () => {
+    void (async () => {
+      if (selectOld(await $.session.messages()).length > 0) await queueShake($, IDLE_SHAKE_INSTRUCTIONS)
+    })().catch(error => $.ui.log(`idle shake failed: ${String(error)}`, { to: 'debug' }))
+  })
+}
+const logIdleError = ($: EngineInterface) => (error: unknown) =>
+  $.ui.log(`idle shake timer failed: ${String(error)}`, { to: 'debug' })
+
 export const register: Register = (on, options) => {
   const config = { ...CONFIG, ...options } as Config
+
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -82,6 +113,7 @@ export const register: Register = (on, options) => {
       description: 'shake: write anchors on the last shake boundary in the session file',
     })
     await $.command.register({ name: 'shake', description: 'shake: replace old tool results now' })
+    void armIdleShake($, config).catch(logIdleError($))
     return next(e)
   })
 
@@ -101,6 +133,7 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    idleArmings += 1
     idleShake?.cancel()
     if (!e.turnId && (isRepairPending || repairing)) await repair($)
     return next(e)
@@ -109,14 +142,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const completed = await next(e)
     if (e.agentId) return completed
-    idleShake?.cancel()
-    if (config.cacheTtlMinutes > 0) {
-      idleShake = $.clock.after(config.cacheTtlMinutes * 60_000, () => {
-        void (async () => {
-          if (selectOld(await $.session.messages()).length > 0) await queueShake($, IDLE_SHAKE_INSTRUCTIONS)
-        })().catch(error => $.ui.log(`idle shake failed: ${String(error)}`, { to: 'debug' }))
-      })
-    }
+    void (async () => armIdleShake($, config, await $.clock.now()))().catch(logIdleError($))
     if (e.reason !== 'answer' || isCompacting) return completed
     isCompacting = true
     void (async () => {

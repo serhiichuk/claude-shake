@@ -3,7 +3,8 @@ import type { SessionMessage, ToolResultSummary } from 'claude-code'
 export const CONFIG = {
   thresholdTokens: 150_000,
   floorShare: 0.33,
-  cacheTtlMinutes: 60,
+  idleShake: true,
+  cacheTtlMinutes: 0,
   keepTokens: 16_000,
   tokensPerChar: 0.34,
   minResultChars: 2_000,

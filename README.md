@@ -30,10 +30,17 @@ Update the ADR, not the copies.
   queues `/compact shake auto` with `$.command.run`. (`$.session.compact()`
   skips the calling plugin's own `session.compact` hook, so it would start a
   native summary compaction.)
-- **Idle shake.** After each main-loop turn, the mod starts a timer for
-  `cacheTtlMinutes`. A new prompt stops it. When it fires, the prompt cache has
-  expired, so the next request writes the whole cache in any case. The mod then
-  queues `/compact shake idle` with no floor, if any tool result is old enough.
+- **Idle shake.** After each main-loop turn, and when a session starts or
+  resumes, the mod starts a timer that ends when the prompt cache expires: the
+  time of the last main-loop request plus the cache lifetime. A new prompt
+  stops it. When it fires, the next request writes the whole cache in any case,
+  so the mod queues `/compact shake idle` with no floor, if any tool result is
+  old enough. On a resume after a longer pause, the timer fires at once.
+  - The cache lifetime comes from the session file: the newest cache write
+    shows `ephemeral_1h_input_tokens` (60 minutes) or
+    `ephemeral_5m_input_tokens` (5 minutes). This follows
+    `CLAUDE_CODE_PROMPT_CACHE_TTL`, `promptCacheTtl` and the plan default
+    without reading them. With no cache write found, the mod uses 60.
 - **Other triggers.** The engine also raises `session.compact` for its own
   auto-compaction, and the mod handles that too. For a manual shake, type
   `/shake` (it queues `/compact shake`) or `/compact shake`.
@@ -116,17 +123,15 @@ claude --plugin-dir /path/to/claude-shake
 
 ## Config
 
-Three values are plugin settings. Change them in `/config`, or in
+Four values are plugin settings. Change them in `/config`, or in
 `settings.json` under `pluginConfigs.shake.options`.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `thresholdTokens` | 150000 | Used context that starts a threshold shake |
 | `floorShare` | 0.33 | Least share of the used context a threshold shake must free |
-| `cacheTtlMinutes` | 60 | Idle time before an idle shake; 0 turns it off |
-
-Set `cacheTtlMinutes` to your prompt cache lifetime: 60 on a subscription, 5
-with an API key, or the value of `CLAUDE_CODE_PROMPT_CACHE_TTL`.
+| `idleShake` | true | Shake with no floor when the prompt cache expires |
+| `cacheTtlMinutes` | 0 | Cache lifetime override; 0 reads it from the session |
 
 The other values are in `CONFIG` in `hooks/shake.ts`:
 

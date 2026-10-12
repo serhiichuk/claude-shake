@@ -3,6 +3,7 @@
 
   shake_io.py save SESSION     stdin: {"since": ms, "items": [{"id", "text"}]}; stdout: {"<id>": "<path>"}
   shake_io.py repair SESSION [--expect JSON] [--timeout S]
+  shake_io.py cache SESSION    stdout: {"lastRequestMs": ms|null, "ttlMinutes": 60|5|null}
 
 SESSION is a session id or a path to a session .jsonl file.
 save records the shake time in <session dir>/shake/last-shake.json. repair anchors
@@ -303,9 +304,37 @@ def repair(session, expect=None, timeout=None):
         time.sleep(POLL_S)
 
 
+def cache(session):
+    """Time of the last main-loop request, and the cache TTL its newest cache write used."""
+    with open(session_path(session), "rb") as f:
+        data = f.read()
+    last_ms = ttl = None
+    for start, end in reversed(split_lines(data)):
+        line = data[start:end]
+        if b'"usage"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        message = row.get("message")
+        if (row.get("type") != "assistant" or row.get("isSidechain") or not isinstance(message, dict)
+                or message.get("model") == "<synthetic>"):
+            continue
+        last_ms = last_ms or parse_ms(row["timestamp"])
+        written = (message.get("usage") or {}).get("cache_creation") or {}
+        if written.get("ephemeral_1h_input_tokens"):
+            ttl = 60
+        elif written.get("ephemeral_5m_input_tokens"):
+            ttl = 5
+        if ttl:
+            break
+    return {"lastRequestMs": last_ms, "ttlMinutes": ttl}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["save", "repair"])
+    parser.add_argument("action", choices=["save", "repair", "cache"])
     parser.add_argument("session")
     parser.add_argument("--expect", type=json.loads)
     parser.add_argument("--timeout", type=float)
@@ -314,6 +343,9 @@ def main():
         if args.action == "save":
             request = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
             print(json.dumps(save(args.session, request["since"], request["items"])))
+            return 0
+        if args.action == "cache":
+            print(json.dumps(cache(args.session)))
             return 0
         code, report = repair(args.session, args.expect, args.timeout)
         print(json.dumps(report))

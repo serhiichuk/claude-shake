@@ -322,6 +322,23 @@ def test_fork(work, fixture):
     print("ok fork: new id, bytes kept except sessionId, source unchanged")
 
 
+def test_cache(work, fixture):
+    path = os.path.join(work, "cache.jsonl")
+    def reply(ts, written, sidechain=False, model="claude-opus-5-5"):
+        usage = {"cache_creation": {"ephemeral_1h_input_tokens": written[0], "ephemeral_5m_input_tokens": written[1]}}
+        return {"type": "assistant", "timestamp": ts, "isSidechain": sidechain,
+                "message": {"model": model, "usage": usage}}
+    rows = [reply("2026-10-12T10:00:00.000Z", (0, 900)), reply("2026-10-12T10:01:00.000Z", (0, 0)),
+            reply("2026-10-12T10:02:00.000Z", (0, 0), model="<synthetic>"),
+            reply("2026-10-12T10:03:00.000Z", (500, 0), sidechain=True)]
+    with open(path, "w") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in rows))
+    code, out, err = run(IO, "cache", path)
+    assert code == 0, err
+    assert json.loads(out) == {"lastRequestMs": 1791799260000.0, "ttlMinutes": 5}, out
+    print("ok cache: last main request time, TTL from the newest cache write")
+
+
 def main():
     fixture = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FIXTURE
     if not os.path.isfile(fixture):
@@ -340,6 +357,7 @@ def main():
         test_check_counts_string_content(work, fixture)
         test_save(work, fixture)
         test_fork(work, fixture)
+        test_cache(work, fixture)
     finally:
         shutil.rmtree(work)
     assert sha(fixture) == fixture_digest, "fixture changed"

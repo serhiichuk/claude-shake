@@ -71,12 +71,23 @@ export const register: Register = on => {
       name: 'shake-repair',
       description: 'shake: write anchors on the last shake boundary in the session file',
     })
+    await $.command.register({ name: 'shake', description: 'shake: replace old tool results now' })
     return next(e)
   })
 
   on('command.run', { command: 'shake-repair' }, async $ => {
     await repair($)
     return { text: '' }
+  })
+
+  on('command.run', { command: 'shake' }, async $ => {
+    // The engine refuses a command run from inside the running command's own hook.
+    $.clock.after(0, () => {
+      void $.command.run({ command: 'compact', args: SHAKE_INSTRUCTIONS }).catch(error =>
+        $.ui.log(`shake command failed: ${String(error)}`, { to: 'debug' }),
+      )
+    })
+    return {}
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -109,7 +120,7 @@ export const register: Register = on => {
     const old = selectOld(e.messages)
     const used = (await $.session.usage()).context.tokens ?? estimatedTokens(e.messages)
     const freed = freedTokens(old)
-    if (freed < CONFIG.floorShare * used) {
+    if (e.trigger !== 'manual' && freed < CONFIG.floorShare * used) {
       if (!isOurs) return next(e)
       return { skip: `shake: a shake frees about ${Math.round(freed)} tokens, below the floor` }
     }

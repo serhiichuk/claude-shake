@@ -29,7 +29,8 @@ Update the ADR, not the copies.
   the context usage. If the usage is at or above the threshold, it calls
   `$.session.compact({ instructions: 'shake' })`. The engine also raises
   `session.compact` for its own auto-compaction, and the mod handles that too.
-  For a manual test, type `/compact shake`.
+  For a manual shake, type `/shake` (it queues `/compact shake`) or
+  `/compact shake`.
 - **Shake** (`session.compact` hook). The mod acts on `/compact shake`, on its
   own trigger and on `auto`. It skips `precompute`, subagent and fork
   transcripts, and a plain `/compact`.
@@ -44,8 +45,9 @@ Update the ADR, not the copies.
   - Assistant messages, `tool_use` blocks, `tool_use_id`s and `is_error` flags
     stay. Each message that the mod did not change keeps its engine handle.
   - If the shake frees less than 15% of the used context, the mod does not
-    shake. On `auto`, native compaction runs instead. On `/compact shake` and on
-    the mod's own trigger, the compaction is skipped with a one-line reason.
+    shake. On `auto`, native compaction runs instead. On the mod's own
+    trigger, the compaction is skipped with a one-line reason. A manual
+    `/compact shake` has no floor.
 - **Anchor repair** (`/shake-repair`). The shake hook queues this command. It
   runs when the session is idle. An idle `prompt.submit` runs the same repair
   after a load, after a failed queue and once after a timeout. It also waits

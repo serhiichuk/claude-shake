@@ -1,6 +1,28 @@
 {
   "name": "shake",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shrink a long session by replacing old tool results with saved-file placeholders during compaction",
-  "author": { "name": "Taras Serhiichuk" }
+  "author": {
+    "name": "Taras Serhiichuk"
+  },
+  "userConfig": {
+    "thresholdTokens": {
+      "type": "number",
+      "title": "Shake threshold (tokens)",
+      "description": "Used context, in tokens, at which a shake starts after an answer.",
+      "default": 150000
+    },
+    "floorShare": {
+      "type": "number",
+      "title": "Floor share",
+      "description": "Least share of the used context that a threshold shake must free. A shake rewrites the prompt cache of what stays, so a small shake costs more than it saves.",
+      "default": 0.33
+    },
+    "cacheTtlMinutes": {
+      "type": "number",
+      "title": "Prompt cache lifetime (minutes)",
+      "description": "Idle minutes after the last answer until the prompt cache expires. Then a shake runs with no floor, because the next request writes the cache again anyway. 0 turns the idle shake off.",
+      "default": 60
+    }
+  }
 }

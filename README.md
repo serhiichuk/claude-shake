@@ -25,16 +25,20 @@ Update the ADR, not the copies.
 
 ## How it works
 
-- **Trigger.** After each main-loop turn that ends with an answer, the mod reads
-  the context usage. If the usage is at or above the threshold, it queues
-  `/compact shake auto` with `$.command.run`. (`$.session.compact()` skips the
-  calling plugin's own `session.compact` hook, so it would start a native
-  summary compaction.) The engine also raises
-  `session.compact` for its own auto-compaction, and the mod handles that too.
-  For a manual shake, type `/shake` (it queues `/compact shake`) or
-  `/compact shake`.
+- **Threshold shake.** After each main-loop turn that ends with an answer, the
+  mod reads the used context. If it is at or above `thresholdTokens`, the mod
+  queues `/compact shake auto` with `$.command.run`. (`$.session.compact()`
+  skips the calling plugin's own `session.compact` hook, so it would start a
+  native summary compaction.)
+- **Idle shake.** After each main-loop turn, the mod starts a timer for
+  `cacheTtlMinutes`. A new prompt stops it. When it fires, the prompt cache has
+  expired, so the next request writes the whole cache in any case. The mod then
+  queues `/compact shake idle` with no floor, if any tool result is old enough.
+- **Other triggers.** The engine also raises `session.compact` for its own
+  auto-compaction, and the mod handles that too. For a manual shake, type
+  `/shake` (it queues `/compact shake`) or `/compact shake`.
 - **Shake** (`session.compact` hook). The mod acts on `/compact shake`, on its
-  own trigger (`/compact shake auto`) and on `auto`. It skips `precompute`,
+  own triggers (`/compact shake auto`, `/compact shake idle`) and on `auto`. It skips `precompute`,
   subagent and fork transcripts, and a plain `/compact`.
   - The newest tool output (16k tokens) stays as it is.
   - An older tool result larger than 2,000 characters is saved to
@@ -46,10 +50,15 @@ Update the ADR, not the copies.
     `<truncated-output>` is never shaken again.
   - Assistant messages, `tool_use` blocks, `tool_use_id`s and `is_error` flags
     stay. Each message that the mod did not change keeps its engine handle.
-  - If the shake frees less than 15% of the used context, the mod does not
-    shake. On `auto`, native compaction runs instead. On the mod's own
-    trigger, the compaction is skipped with a one-line reason. A manual
-    `/compact shake` has no floor.
+  - If the shake frees less than `floorShare` of the used context, the mod
+    does not shake. On `auto`, native compaction runs instead. On the
+    threshold shake, the compaction is skipped with a one-line reason, and the
+    next try waits until the context grows by `floorShare`. A manual
+    `/compact shake` and the idle shake have no floor.
+  - Each shake makes the next request write the prompt cache of all messages
+    again (measured: only the system prompt and tools, about 24k tokens, stay
+    cached). The break-even is about `20 x kept / freed` requests with the 1 h
+    cache.
 - **Anchor repair** (`/shake-repair`). The shake hook queues this command. It
   runs when the session is idle. An idle `prompt.submit` runs the same repair
   after a load, after a failed queue and once after a timeout. It also waits
@@ -107,15 +116,25 @@ claude --plugin-dir /path/to/claude-shake
 
 ## Config
 
-All values are in `CONFIG` in `hooks/shake.ts`. There are no other options.
+Three values are plugin settings. Change them in `/config`, or in
+`settings.json` under `pluginConfigs.shake.options`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `thresholdTokens` | 150000 | Used context that starts a threshold shake |
+| `floorShare` | 0.33 | Least share of the used context a threshold shake must free |
+| `cacheTtlMinutes` | 60 | Idle time before an idle shake; 0 turns it off |
+
+Set `cacheTtlMinutes` to your prompt cache lifetime: 60 on a subscription, 5
+with an API key, or the value of `CLAUDE_CODE_PROMPT_CACHE_TTL`.
+
+The other values are in `CONFIG` in `hooks/shake.ts`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `thresholdPercent` | 60 | Context usage that starts a shake after a turn |
 | `keepTokens` | 16000 | Newest tool output that is never shaken |
 | `tokensPerChar` | 0.34 | Token estimate for one character |
 | `minResultChars` | 2000 | Smallest result that is shaken |
-| `floorShare` | 0.15 | Least share of the used context a shake must free |
 
 With `--plugin-dir`, a saved edit reloads the module in the running session.
 
@@ -163,8 +182,8 @@ Each step that sends a prompt to the model costs API tokens.
     duplicates.
 12. Optional: ask the model to read one saved file from a placeholder.
     Expected: it reads the full original output.
-13. Optional, for the automatic trigger: set `thresholdPercent` to a value
-    under the current usage, save the file, and send one prompt. Expected:
+13. Optional, for the automatic trigger: set `thresholdTokens` to a value
+    under the current usage, and send one prompt. Expected:
     after the answer, the same toast and notice as in step 6.
 14. Remove the fork when done: the fork `.jsonl` file and the
     `<project dir>/<new id>/` directory.

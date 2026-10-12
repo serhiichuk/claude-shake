@@ -1,17 +1,19 @@
 import type { SessionMessage, ToolResultSummary } from 'claude-code'
 
 export const CONFIG = {
-  thresholdPercent: 60,
+  thresholdTokens: 150_000,
+  floorShare: 0.33,
+  cacheTtlMinutes: 60,
   keepTokens: 16_000,
   tokensPerChar: 0.34,
   minResultChars: 2_000,
-  floorShare: 0.15,
 }
 
 export type Config = typeof CONFIG
 
 export const SHAKE_INSTRUCTIONS = 'shake'
 export const AUTO_SHAKE_INSTRUCTIONS = 'shake auto'
+export const IDLE_SHAKE_INSTRUCTIONS = 'shake idle'
 
 const PREVIEW_CHARS = 500
 const PLACEHOLDER_OVERHEAD_CHARS = PREVIEW_CHARS + 300

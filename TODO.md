@@ -1,12 +1,12 @@
 # TODO
 
-- [ ] Choose the auto shake rule from the cache cost
-  (`~/.agents/artifacts/claude-shake/main/20261012-cache-cost-per-shake.md`):
-  a shake costs a 2x cache write of what stays, so the break-even is about
-  `20 x kept / freed` requests. The 15% floor does not measure that. Options:
-  - shake only on a cold cache (first prompt after a pause longer than the TTL);
-  - a payback floor (for example, freed >= kept);
-  - leave it to the engine's `auto` trigger.
+- [ ] Idle shake on resume: the idle timer runs only while the session is open.
+  On a resume after a pause longer than the cache lifetime, the plugin could
+  read the time of the last request from the session file and shake at once.
+  Until then, type `/shake` after such a resume.
+- [ ] Check that `cacheTtlMinutes` can come from `promptCacheTtl` or
+  `CLAUDE_CODE_PROMPT_CACHE_TTL` (`$.env.get`, `$.config.list`) instead of a
+  separate setting.
 - [ ] Check whether `return {}` from `/shake` shows an empty output row (the
   screen did not render cleanly in the 2026-10-12 test).
 - [ ] Transcript noise after a shake:

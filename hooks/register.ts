@@ -1,8 +1,10 @@
-import type { EngineInterface, Register, ToolResultSummary } from 'claude-code'
+import type { EngineInterface, Register, Timer, ToolResultSummary } from 'claude-code'
 
 import {
   AUTO_SHAKE_INSTRUCTIONS,
   CONFIG,
+  type Config,
+  IDLE_SHAKE_INSTRUCTIONS,
   SHAKE_INSTRUCTIONS,
   estimatedTokens,
   freedTokens,
@@ -35,6 +37,7 @@ let expectation: RepairExpectation | undefined
 let repairing: Promise<void> | undefined
 let retryAboveTokens = 0
 let timeoutRetries = 0
+let idleShake: Timer | undefined
 
 const settleRepair = ($: EngineInterface, exitCode: number): void => {
   if (exitCode === 2 && timeoutRetries < REPAIR_TIMEOUT_RETRIES) {
@@ -66,7 +69,13 @@ const repair = ($: EngineInterface): Promise<void> =>
       repairing = undefined
     }))
 
-export const register: Register = on => {
+// $.session.compact() skips this plugin's own session.compact hook; a queued /compact reaches it.
+const queueShake = ($: EngineInterface, instructions: string): Promise<unknown> =>
+  $.command.run({ command: 'compact', args: instructions })
+
+export const register: Register = (on, options) => {
+  const config = { ...CONFIG, ...options } as Config
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'shake-repair',
@@ -84,7 +93,7 @@ export const register: Register = on => {
   on('command.run', { command: 'shake' }, async $ => {
     // The engine refuses a command run from inside the running command's own hook.
     $.clock.after(0, () => {
-      void $.command.run({ command: 'compact', args: SHAKE_INSTRUCTIONS }).catch(error =>
+      void queueShake($, SHAKE_INSTRUCTIONS).catch(error =>
         $.ui.log(`shake command failed: ${String(error)}`, { to: 'debug' }),
       )
     })
@@ -92,20 +101,28 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    idleShake?.cancel()
     if (!e.turnId && (isRepairPending || repairing)) await repair($)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const completed = await next(e)
-    if (e.agentId || e.reason !== 'answer' || isCompacting) return completed
+    if (e.agentId) return completed
+    idleShake?.cancel()
+    if (config.cacheTtlMinutes > 0) {
+      idleShake = $.clock.after(config.cacheTtlMinutes * 60_000, () => {
+        void (async () => {
+          if (selectOld(await $.session.messages()).length > 0) await queueShake($, IDLE_SHAKE_INSTRUCTIONS)
+        })().catch(error => $.ui.log(`idle shake failed: ${String(error)}`, { to: 'debug' }))
+      })
+    }
+    if (e.reason !== 'answer' || isCompacting) return completed
     isCompacting = true
     void (async () => {
-      const { context } = await $.session.usage()
-      const tokens = context.tokens ?? 0
-      if ((context.percent ?? 0) < CONFIG.thresholdPercent || tokens < retryAboveTokens) return
-      // $.session.compact() skips this plugin's own session.compact hook; a queued /compact reaches it.
-      await $.command.run({ command: 'compact', args: AUTO_SHAKE_INSTRUCTIONS })
+      const tokens = (await $.session.usage()).context.tokens ?? 0
+      if (tokens < config.thresholdTokens || tokens < retryAboveTokens) return
+      await queueShake($, AUTO_SHAKE_INSTRUCTIONS)
     })()
       .catch(error => $.ui.log(`auto shake failed: ${String(error)}`, { to: 'debug' }))
       .finally(() => {
@@ -116,14 +133,14 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const isAuto = e.instructions === AUTO_SHAKE_INSTRUCTIONS
-    const isOurs = isAuto || e.instructions === SHAKE_INSTRUCTIONS
+    const isOurs = isAuto || e.instructions === SHAKE_INSTRUCTIONS || e.instructions === IDLE_SHAKE_INSTRUCTIONS
     if (e.agentId || e.trigger === 'precompute' || !(isOurs || e.trigger === 'auto')) return next(e)
     const since = await $.clock.now()
     const old = selectOld(e.messages)
     const used = (await $.session.usage()).context.tokens ?? estimatedTokens(e.messages)
     const freed = freedTokens(old)
-    if (isAuto) retryAboveTokens = used * (1 + CONFIG.floorShare)
-    if ((isAuto || e.trigger !== 'manual') && freed < CONFIG.floorShare * used) {
+    if (isAuto) retryAboveTokens = used * (1 + config.floorShare)
+    if ((isAuto || e.trigger !== 'manual') && freed < config.floorShare * used) {
       if (!isOurs) return next(e)
       return { skip: `shake: a shake frees about ${Math.round(freed)} tokens, below the floor` }
     }

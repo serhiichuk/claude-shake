@@ -1,38 +1,27 @@
 # TODO
 
-- [ ] Transcript noise that the mod cannot remove:
-  - a queued shake shows the `/compact shake …` row and the engine's
-    `Compacted (ctrl+o to see full summary)` line. `$.session.compact()` would
-    avoid both, but called under a hook's work (a command, a turn) the engine
-    skips the plugin's own `session.compact` hook and its `.catch`, and core
-    then writes a native summary (live test 2026-10-12). Retry if the engine
-    asks the `.catch` on re-entry.
-  - the `PostCompact` line with the long shell command comes from Orca's
-    `~/.orca/agent-hooks/claude-hook.sh`, which prints `{}`; every compaction
-    shows it. A fix belongs in Orca (print `{"suppressOutput": true}`;
-    unverified).
-- [ ] Check whether `return {}` from `/shake` shows an empty output row.
-- [ ] Skip the startup repair check when the session has no `shake/` dir
-  (review 3, P3: about 15 ms of subprocess time on the first prompt of every
-  session).
+- [ ] Test a prompt typed while the queued `/resume` runs: does the redraw keep
+  the text in the prompt box?
+- [ ] Test the reload with Monitor tasks, cron jobs and Orca peer messages
+  (background shells and subagents are measured to survive it).
+- [ ] The classic `SessionStart` hooks add their context again on each reload
+  (for example ponytail). Measure what that costs per shake.
+- [ ] Explain why the threshold shake freed 31k tokens where the mod estimated
+  15.5k (the test outputs were repeated letters).
+- [ ] Test `/rewind` and fork from a row before a shake.
+- [ ] Check storage v5 (`replaceRecords`) sessions; the rewrite assumes the
+  plain JSONL file.
+- [ ] Headless (`-p`) sessions shake the file but cannot reload; check that the
+  next `--resume` (an Orca worker restart) loads the shaken file.
 - [ ] Check whether to set `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`: its
-  default and effect are untested. A Read cap limits new large reads, which
-  the shake frees only later.
-- [ ] Explain why a resumed session is 10-15k tokens larger than the live one
-  after a shake (attachment rows? thinking counted after load?).
-- [ ] Check that the 3 s repair timeout is enough on a slow disk; the live tests
-  anchored, but the wait was not recorded.
-- [ ] Test `/rewind` and fork from a row before a shake boundary.
-- [ ] Check storage v5 (`replaceRecords`) sessions; the repair assumes the plain
-  JSONL file.
-- [ ] Headless (`-p`) sessions: check that the auto trigger's queued
-  `/compact shake auto` runs there.
-- [ ] Re-check the loader facts (`g1r`, `S1r`, `nOn`, `zKr`) after each Claude
-  Code update; the mod depends on an undocumented file format.
+  default and effect are untested. Claude Code 2.1.304 already saves large
+  new results as `<persisted-output>`.
+- [ ] Re-check the file format after each Claude Code update; the mod depends on
+  an undocumented format.
 - [ ] Upstream request: expose `content-replacement` (flag
   `tengu_hawthorn_steeple`) to mods as an op, and a history reload op.
-- [ ] Optional: the idle file shake + mod-queued `/resume <same id>` route
-  (ADR-0003) as a fallback that keeps attachment rows.
+- [ ] Update ADR-0003 in the `agents` repo: the file route replaced the compact
+  route on 2026-10-20 (the guard skips `session.compact` on a Team login).
 
 Decisions: [ADR-0003](../agents/docs/decisions/0003-shake-session-file-at-idle.md)
 in the `agents` repo (see README "Decisions"). Frozen research and review copies

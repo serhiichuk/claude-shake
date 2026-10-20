@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "shake",
-      "description": "Shrink a long session by replacing old tool results with saved-file placeholders during compaction",
+      "description": "Shrink a long session by replacing old tool results in the session file with saved-file placeholders, then reloading it",
       "source": "./",
       "category": "productivity"
     }

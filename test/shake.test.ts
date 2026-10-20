@@ -1,7 +1,7 @@
 import type { SessionMessage } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { CONFIG, placeholder, preview, replaceResults, selectOld } from '../hooks/shake'
+import { CONFIG, placeholder, preview, selectOld } from '../hooks/shake'
 
 const call = (id: string): SessionMessage => ({
   role: 'assistant',
@@ -47,19 +47,6 @@ test('a shaken placeholder does not fill the keep window', () => {
     call('placeholder'), answer('placeholder', `<persisted-output>\n${big(Math.ceil(keepChars) + 10)}`),
   ]
   expect(selectOld(messages)).toEqual([])
-})
-
-test('replacement keeps assistants, unchanged handles, ids and is_error', () => {
-  const out = replaceResults(session, new Map([['old-big', '/saved/old-big.txt']]))
-  expect(out.length).toBe(session.length)
-  session.forEach((message, i) => {
-    if (message.role === 'assistant' || i !== 1) expect(out[i]).toEqual(message)
-  })
-  const changed = out[1]!
-  expect(changed.handle).toBeUndefined()
-  expect(changed.toolResults?.[0]?.tool_use_id).toBe('old-big')
-  expect(changed.toolResults?.[0]?.isError).toBe(true)
-  expect(changed.toolResults?.[0]?.text.startsWith('<persisted-output>\nOutput too large (29.3KB). Full output saved to: /saved/old-big.txt\n')).toBe(true)
 })
 
 test('preview never splits a surrogate pair', () => {

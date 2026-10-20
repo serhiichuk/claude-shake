@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """File side of the claude-shake mod.
 
-  shake_io.py save SESSION     stdin: {"since": ms, "items": [{"id", "text"}]}; stdout: {"<id>": "<path>"}
-  shake_io.py repair SESSION [--expect JSON] [--timeout S]
+  shake_io.py save SESSION     stdin: {"items": [{"id", "text"}]}; stdout: {"<id>": "<path>"}
+  shake_io.py shake SESSION [--timeout S]
+                               stdin: {"<tool_use_id>": "<placeholder>"}; stdout: {"replaced": [ids]}
   shake_io.py cache SESSION    stdout: {"lastRequestMs": ms|null, "ttlMinutes": 60|5|null}
 
 SESSION is a session id or a path to a session .jsonl file.
-save records the shake time in <session dir>/shake/last-shake.json. repair anchors
-only the boundary of that shake: the one boundary at or after that time.
-repair exit codes: 0 done or nothing to do, 2 timed out or the file changed under
-the rewrite (worth one retry), 3 refused.
+shake replaces the content of each named tool_result block in the file and changes no
+other line. A block that is already shaken stays. shake exit codes: 0 done or nothing
+to do, 2 timed out or the file changed under the rewrite, 3 refused.
 """
 import argparse
 import glob
@@ -52,26 +52,7 @@ def shake_dir(path):
     return os.path.join(path[: -len(".jsonl")], "shake")
 
 
-def last_shake_since(path):
-    try:
-        with open(os.path.join(shake_dir(path), "last-shake.json"), encoding="utf-8") as f:
-            since = json.load(f)["since"]
-    except (FileNotFoundError, ValueError, KeyError, TypeError):
-        return None
-    return since if isinstance(since, (int, float)) and not isinstance(since, bool) else None
-
-
-def record_shake(out_dir, since):
-    tmp = os.path.join(out_dir, "last-shake.json.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"since": since}, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp, os.path.join(out_dir, "last-shake.json"))
-
-
-def save(session, since, items):
+def save(session, items):
     path = session_path(session)
     os.makedirs(os.path.dirname(shake_dir(path)), mode=0o700, exist_ok=True)
     out_dir = shake_dir(path)
@@ -94,8 +75,6 @@ def save(session, since, items):
             f.flush()
             os.fsync(f.fileno())
         saved[item["id"]] = target
-    if saved:
-        record_shake(out_dir, since)
     return saved
 
 
@@ -118,93 +97,6 @@ def split_lines(data):
         start = end + 1
 
 
-def last_boundary(data, spans):
-    for i in range(len(spans) - 1, -1, -1):
-        line = data[spans[i][0]:spans[i][1]]
-        if b'"compact_boundary"' not in line:
-            continue
-        row = json.loads(line)
-        if row.get("type") == "system" and row.get("subtype") == "compact_boundary":
-            return i, row
-    return None, None
-
-
-def tool_result_ids(row):
-    content = row.get("message", {}).get("content") if row.get("type") == "user" else None
-    if not isinstance(content, list):
-        return []
-    return [b.get("tool_use_id") for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
-
-
-def boundaries_since(data, spans, since):
-    count = 0
-    for start, end in spans:
-        line = data[start:end]
-        if b'"compact_boundary"' in line:
-            row = json.loads(line)
-            count += row.get("subtype") == "compact_boundary" and parse_ms(row["timestamp"]) >= since
-    return count
-
-
-def inspect(data, expect, since):
-    """Return (state, plan). state is 'done:<why>', 'wait:<why>' or 'ready'."""
-    if since is None:
-        return "done:not ours (no shake recorded)", None
-    if not data.endswith(b"\n") and data:
-        return "wait:partial tail", None
-    spans = split_lines(data)
-    index, boundary = last_boundary(data, spans)
-    if boundary is None:
-        return ("wait:no boundary" if expect else "done:no boundary"), None
-    if parse_ms(boundary["timestamp"]) < since:
-        return ("wait:no new boundary" if expect else "done:not ours (older than the last shake)"), None
-    if boundaries_since(data, spans, since) > 1:
-        return "done:not ours (another compaction followed the shake)", None
-    meta = boundary.get("compactMetadata") or {}
-    if meta.get("preservedMessages") or meta.get("preservedSegment"):
-        return "done:already anchored", None
-    after = [json.loads(data[s:e]) for s, e in spans[index + 1:]]
-    if any(r.get("type") == "user" and r.get("isCompactSummary") for r in after):
-        return "done:native boundary", None
-    if expect:
-        written = {i for r in after for i in tool_result_ids(r)}
-        if not set(expect["toolIds"]) <= written:
-            return "wait:hook rows not on disk", None
-    return "ready", (spans, index, boundary, after)
-
-
-def anchored_line(data, spans, index, boundary, after):
-    start, end = spans[index]
-    line = data[start:end]
-    if dumps(boundary).encode("utf-8") != line:
-        raise Refused("boundary line does not round-trip byte for byte", line=index + 1)
-    before = set()
-    for s, e in spans[:index]:
-        uid = json.loads(data[s:e]).get("uuid")
-        if uid:
-            before.add(uid)
-    uuids, previous = [], boundary["uuid"]
-    for row in after:
-        uid = row.get("uuid")
-        if not uid or row.get("isSidechain"):
-            continue
-        parent = row.get("parentUuid")
-        if uid in before or uid in uuids:
-            raise Refused("duplicate uuid after the boundary", uuid=uid)
-        if parent != previous and parent not in before:
-            raise Refused("rows after the boundary do not form one chain", uuid=uid, parent=parent)
-        uuids.append(uid)
-        previous = uid
-    if not uuids:
-        raise Refused("no rows after the boundary")
-    boundary = dict(boundary)
-    boundary["compactMetadata"] = {
-        **(boundary.get("compactMetadata") or {}),
-        "preservedMessages": {"anchorUuid": boundary["uuid"], "uuids": uuids},
-    }
-    return start, end, dumps(boundary).encode("utf-8"), len(uuids)
-
-
 def write_all(fd, data):
     view = memoryview(data)
     while view:
@@ -220,17 +112,16 @@ def prune_backups(path):
         os.unlink(old)
 
 
-def rewrite(path, snapshot, data, start, end, new_line):
+def rewrite(path, snapshot, body):
     tmp, backup = path + ".shake-tmp", f"{path}.shake-bak.{time.time_ns()}"
     if os.path.lexists(tmp):
         os.unlink(tmp)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, snapshot.st_mode & 0o777)
     try:
-        body = data[:start] + new_line + data[end:]
         write_all(fd, body)
         now = os.stat(path)
         if now.st_ino != snapshot.st_ino or now.st_size < snapshot.st_size:
-            raise Changed("session file changed under the repair")
+            raise Changed("session file changed under the rewrite")
         tail = b""
         if now.st_size > snapshot.st_size:
             with open(path, "rb") as f:
@@ -252,7 +143,7 @@ def rewrite(path, snapshot, data, start, end, new_line):
     if final.st_ino != snapshot.st_ino or final.st_size != copied:
         os.unlink(tmp)
         os.unlink(backup)
-        raise Changed("session file changed under the repair")
+        raise Changed("session file changed under the rewrite")
     os.rename(tmp, path)
     dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
     try:
@@ -276,32 +167,65 @@ def rewrite(path, snapshot, data, start, end, new_line):
     return {}
 
 
-def repair(session, expect=None, timeout=None):
+SHAKEN_PREFIXES = ("[shaken:", "<persisted-output>", "<truncated-output>")
+
+
+def shaken_line(line, replacements):
+    """Return (new line, replaced ids), or (None, []) when no block of the line changes."""
+    if b'"tool_result"' not in line:
+        return None, []
+    row = json.loads(line)
+    content = (row.get("message") or {}).get("content") if row.get("type") == "user" else None
+    if not isinstance(content, list):
+        return None, []
+    replaced = []
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            continue
+        new = replacements.get(block.get("tool_use_id"))
+        old = block.get("content")
+        if new is None or (isinstance(old, str) and old.lstrip().startswith(SHAKEN_PREFIXES)):
+            continue
+        block["content"] = new
+        replaced.append(block["tool_use_id"])
+    if not replaced:
+        return None, []
     try:
-        path = session_path(session)
-    except Refused:
-        return 0, {"status": "no session file"}
-    timeout = timeout if timeout is not None else (10.0 if expect else 2.0)
-    since = expect["since"] if expect else last_shake_since(path)
+        return dumps(row).encode("utf-8"), replaced
+    except UnicodeEncodeError:  # a lone surrogate: leave the row as it is
+        return None, []
+
+
+def shake(session, replacements, timeout=3.0):
+    """Wait until the file is stable, then replace the named tool results in place."""
+    path = session_path(session)
     deadline = time.monotonic() + timeout
     stable_size, stable_since = None, None
     while True:
         snapshot = os.stat(path)
-        with open(path, "rb") as f:
-            data = f.read(snapshot.st_size)
-        state, plan = inspect(data, expect, since)
-        if state.startswith("done:"):
-            return 0, {"status": state[5:]}
         now = time.monotonic()
         if snapshot.st_size != stable_size:
             stable_size, stable_since = snapshot.st_size, now
-        if state == "ready" and now - stable_since >= STABLE_S:
-            start, end, new_line, listed = anchored_line(data, *plan)
-            extra = rewrite(path, snapshot, data, start, end, new_line)
-            return 0, {"status": "anchored", "uuids": listed, **extra}
+        elif now - stable_since >= STABLE_S:
+            with open(path, "rb") as f:
+                data = f.read(snapshot.st_size)
+            if not data or data.endswith(b"\n"):
+                break
         if now >= deadline:
-            return 2, {"status": "timeout", "waiting_for": state.split(":", 1)[-1]}
+            return 2, {"status": "timeout", "waiting_for": "a stable file"}
         time.sleep(POLL_S)
+    parts, replaced, done = [], [], 0
+    for start, end in split_lines(data):
+        new_line, ids = shaken_line(data[start:end], replacements)
+        if new_line is not None:
+            parts += [data[done:start], new_line]
+            done = end
+            replaced += ids
+    if not replaced:
+        return 0, {"status": "nothing to replace", "replaced": []}
+    parts.append(data[done:])
+    extra = rewrite(path, snapshot, b"".join(parts))
+    return 0, {"status": "shaken", "replaced": replaced, **extra}
 
 
 def cache(session):
@@ -334,20 +258,19 @@ def cache(session):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["save", "repair", "cache"])
+    parser.add_argument("action", choices=["save", "shake", "cache"])
     parser.add_argument("session")
-    parser.add_argument("--expect", type=json.loads)
-    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--timeout", type=float, default=3.0)
     args = parser.parse_args()
     try:
-        if args.action == "save":
-            request = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
-            print(json.dumps(save(args.session, request["since"], request["items"])))
-            return 0
         if args.action == "cache":
             print(json.dumps(cache(args.session)))
             return 0
-        code, report = repair(args.session, args.expect, args.timeout)
+        request = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
+        if args.action == "save":
+            print(json.dumps(save(args.session, request["items"])))
+            return 0
+        code, report = shake(args.session, request, args.timeout)
         print(json.dumps(report))
         return code
     except Refused as refused:

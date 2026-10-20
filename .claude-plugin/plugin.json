@@ -1,7 +1,7 @@
 {
   "name": "shake",
-  "version": "0.3.1",
-  "description": "Shrink a long session by replacing old tool results with saved-file placeholders during compaction",
+  "version": "0.4.0",
+  "description": "Shrink a long session by replacing old tool results in the session file with saved-file placeholders, then reloading it",
   "author": {
     "name": "Taras Serhiichuk"
   },

@@ -16,7 +16,7 @@ import sys
 
 SKIP_PRECOMPACT_BYTES = 5 * 1024 * 1024
 SHAKEN = ("[shaken:", "<persisted-output>", "<truncated-output>")
-SAVED_PATH = re.compile(r"(?:Full output saved to: |original output saved at )(\S+?)(?=\.?\s|$)")
+SAVED_PATH = re.compile(r"(?:Full output saved to: |original output saved at )(.+?\.txt)\b")  # a path may hold spaces
 
 
 def is_boundary(row):

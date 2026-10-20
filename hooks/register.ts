@@ -1,21 +1,9 @@
-import type { EngineInterface, Register, Timer, ToolResultSummary } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import {
-  AUTO_SHAKE_INSTRUCTIONS,
-  CONFIG,
-  type Config,
-  IDLE_SHAKE_INSTRUCTIONS,
-  SHAKE_INSTRUCTIONS,
-  estimatedTokens,
-  freedTokens,
-  replaceResults,
-  selectOld,
-} from './shake'
+import { CONFIG, type Config, freedTokens, placeholder, selectOld } from './shake'
 
-type RepairExpectation = { since: number; toolIds: string[] }
+type Trigger = 'manual' | 'threshold' | 'idle'
 
-const REPAIR_TIMEOUT_SECONDS = 3
-const REPAIR_TIMEOUT_RETRIES = 1
 const DEFAULT_CACHE_TTL_MINUTES = 60
 // Waits past the TTL with a margin, as omp does (90 min for the 1 h TTL): a shake on a still-warm cache pays a full cache write.
 const CACHE_EXPIRY_MARGIN = 1.5
@@ -23,59 +11,66 @@ const CACHE_EXPIRY_MARGIN = 1.5
 const runHelper = async ($: EngineInterface, args: string[], stdin?: string) =>
   $.process.run(['python3', `${$.plugin.root}/bin/shake_io.py`, ...args], { stdin, timeoutMs: 60_000 })
 
-const saveOriginals = async (
-  $: EngineInterface,
-  since: number,
-  results: readonly ToolResultSummary[],
-): Promise<Map<string, string>> => {
-  const items = results.map(result => ({ id: result.tool_use_id, text: result.text }))
-  const run = await runHelper($, ['save', await $.session.id()], JSON.stringify({ since, items }))
-  if (run.exitCode !== 0) throw new Error('shake could not save the original tool results', { cause: run })
-  return new Map(Object.entries(JSON.parse(run.stdout) as Record<string, string>))
+const runJson = async <T>($: EngineInterface, args: string[], stdin: unknown): Promise<T> => {
+  const run = await runHelper($, args, JSON.stringify(stdin))
+  if (run.exitCode !== 0) throw new Error(`shake_io ${args[0]} exit ${run.exitCode}: ${run.stdout.trim()}`)
+  return JSON.parse(run.stdout) as T
 }
 
-let isCompacting = false
-let isRepairPending = true
-let expectation: RepairExpectation | undefined
-let repairing: Promise<void> | undefined
+let writing: Promise<void> | undefined
 let retryAboveTokens = 0
-let timeoutRetries = 0
 let idleShake: Timer | undefined
 let idleArmings = 0
 
-const settleRepair = ($: EngineInterface, exitCode: number): void => {
-  if (exitCode === 2 && timeoutRetries < REPAIR_TIMEOUT_RETRIES) {
-    timeoutRetries += 1
+const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
+
+// Rewrites the tool results in the session file; the live process sends them only after the queued /resume reloads it.
+const shake = async ($: EngineInterface, config: Config, trigger: Trigger): Promise<void> => {
+  const old = selectOld(await $.session.messages())
+  if (old.length === 0) {
+    if (trigger === 'manual') $.ui.log('Nothing to shake.')
     return
   }
-  isRepairPending = false
-  expectation = undefined
-  timeoutRetries = 0
-  if (exitCode !== 0) $.ui.toast('shake: anchor repair gave up; a resume may load duplicates (see the debug log)')
-}
-
-const runRepair = async ($: EngineInterface): Promise<void> => {
-  const expected = expectation
-  const args = ['repair', await $.session.id(), '--timeout', String(REPAIR_TIMEOUT_SECONDS)]
-  if (expected) args.push('--expect', JSON.stringify(expected))
-  const run = await runHelper($, args).catch(error => {
-    $.ui.log(`repair helper failed: ${String(error)}`, { to: 'debug' })
-    return undefined
+  if (trigger === 'threshold') {
+    const tokens = (await $.session.usage()).context.tokens ?? 0
+    if (tokens < config.thresholdTokens || tokens < retryAboveTokens) return
+    // Also stops a retry each turn when the reload fails (headless): the next try waits until the context grows.
+    retryAboveTokens = tokens * (1 + config.floorShare)
+    if (freedTokens(old) < config.floorShare * tokens) return
+  }
+  const id = await $.session.id()
+  const write = (async () => {
+    const items = old.map(result => ({ id: result.tool_use_id, text: result.text }))
+    const saved = await runJson<Record<string, string>>($, ['save', id], { items })
+    const replacements = Object.fromEntries(
+      old.filter(result => saved[result.tool_use_id]).map(r => [r.tool_use_id, placeholder(saved[r.tool_use_id]!, r.text)]),
+    )
+    return runJson<{ replaced: string[] }>($, ['shake', id], replacements)
+  })()
+  writing = write.then(() => undefined, () => undefined)
+  const { replaced } = await write.finally(() => {
+    writing = undefined
   })
-  if (run) $.ui.log(`repair exit ${run.exitCode}: ${run.stdout.trim()} ${run.stderr.trim()}`, { to: 'debug' })
-  if (expectation === expected) settleRepair($, run?.exitCode ?? 3)
+  if (replaced.length === 0) {
+    if (trigger === 'manual') $.ui.log('Nothing to shake.')
+    return
+  }
+  await $.command.run({ command: 'resume', args: id })
+  retryAboveTokens = 0
+  // An id repeats in the list for each row it was replaced in (copies from before a compaction boundary).
+  const shaken = old.filter(result => replaced.includes(result.tool_use_id))
+  $.ui.log(`Shook ${plural(shaken.length, 'tool result')} (~${Math.round(freedTokens(shaken))} tokens freed).`)
 }
 
-const repair = ($: EngineInterface): Promise<void> =>
-  (repairing ??= runRepair($)
-    .catch(() => settleRepair($, 3))
-    .finally(() => {
-      repairing = undefined
-    }))
+let shaking: Promise<void> | undefined
 
-// $.session.compact() skips this plugin's own session.compact hook; a queued /compact reaches it.
-const queueShake = ($: EngineInterface, instructions: string): Promise<unknown> =>
-  $.command.run({ command: 'compact', args: instructions })
+const startShake = ($: EngineInterface, config: Config, trigger: Trigger): void => {
+  shaking ??= shake($, config, trigger)
+    .catch(error => $.ui.log(`${trigger} shake failed: ${String(error)}`, { to: 'debug' }))
+    .finally(() => {
+      shaking = undefined
+    })
+}
 
 type CacheState = { lastRequestMs: number | null; ttlMinutes: number | null }
 
@@ -96,14 +91,8 @@ const armIdleShake = async ($: EngineInterface, config: Config, lastRequestMs?: 
   const ttlMinutes = config.cacheTtlMinutes || cache.ttlMinutes || DEFAULT_CACHE_TTL_MINUTES
   const delay = Math.max(0, since + ttlMinutes * CACHE_EXPIRY_MARGIN * 60_000 - (await $.clock.now()))
   if (arming !== idleArmings) return
-  idleShake = $.clock.after(delay, () => {
-    void (async () => {
-      if (selectOld(await $.session.messages()).length > 0) await queueShake($, IDLE_SHAKE_INSTRUCTIONS)
-    })().catch(error => $.ui.log(`idle shake failed: ${String(error)}`, { to: 'debug' }))
-  })
+  idleShake = $.clock.after(delay, () => startShake($, config, 'idle'))
 }
-
-const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`
 
 const logIdleError = ($: EngineInterface) => (error: unknown) =>
   $.ui.log(`idle shake timer failed: ${String(error)}`, { to: 'debug' })
@@ -112,34 +101,22 @@ export const register: Register = (on, options) => {
   const config = { ...CONFIG, ...options } as Config
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'shake-repair',
-      description: 'shake: write anchors on the last shake boundary in the session file',
-    })
     await $.command.register({ name: 'shake', description: 'shake: replace old tool results now' })
     void armIdleShake($, config).catch(logIdleError($))
     return next(e)
   })
 
-  on('command.run', { command: 'shake-repair' }, async $ => {
-    await repair($)
-    return { text: '' }
-  })
-
   on('command.run', { command: 'shake' }, async $ => {
     // The engine refuses a command run from inside the running command's own hook.
-    $.clock.after(0, () => {
-      void queueShake($, SHAKE_INSTRUCTIONS).catch(error =>
-        $.ui.log(`shake command failed: ${String(error)}`, { to: 'debug' }),
-      )
-    })
+    $.clock.after(0, () => startShake($, config, 'manual'))
     return {}
   })
 
-  on('prompt.submit', async ($, e, next) => {
+  on('prompt.submit', async (_, e, next) => {
     idleArmings += 1
     idleShake?.cancel()
-    if (!e.turnId && (isRepairPending || repairing)) await repair($)
+    // Waits for the file rewrite only: the queued /resume runs after this turn.
+    if (!e.turnId && writing) await writing
     return next(e)
   })
 
@@ -147,56 +124,7 @@ export const register: Register = (on, options) => {
     const completed = await next(e)
     if (e.agentId) return completed
     void (async () => armIdleShake($, config, await $.clock.now()))().catch(logIdleError($))
-    if (e.reason !== 'answer' || isCompacting) return completed
-    isCompacting = true
-    void (async () => {
-      const tokens = (await $.session.usage()).context.tokens ?? 0
-      if (tokens < config.thresholdTokens || tokens < retryAboveTokens) return
-      // Checked before the queue too, so a shake below the floor leaves no /compact row in the transcript.
-      if (freedTokens(selectOld(await $.session.messages())) < config.floorShare * tokens) {
-        retryAboveTokens = tokens * (1 + config.floorShare)
-        return
-      }
-      await queueShake($, AUTO_SHAKE_INSTRUCTIONS)
-    })()
-      .catch(error => $.ui.log(`auto shake failed: ${String(error)}`, { to: 'debug' }))
-      .finally(() => {
-        isCompacting = false
-      })
+    if (e.reason === 'answer') startShake($, config, 'threshold')
     return completed
-  })
-
-  on('session.compact', async ($, e, next) => {
-    const isAuto = e.instructions === AUTO_SHAKE_INSTRUCTIONS
-    const isOurs = isAuto || e.instructions === SHAKE_INSTRUCTIONS || e.instructions === IDLE_SHAKE_INSTRUCTIONS
-    if (e.agentId || e.trigger === 'precompute' || !(isOurs || e.trigger === 'auto')) return next(e)
-    const since = await $.clock.now()
-    const old = selectOld(e.messages)
-    const used = (await $.session.usage()).context.tokens ?? estimatedTokens(e.messages)
-    const freed = freedTokens(old)
-    if (isAuto) retryAboveTokens = used * (1 + config.floorShare)
-    if (old.length === 0) return isOurs ? { skip: 'Nothing to shake.' } : next(e)
-    if ((isAuto || e.trigger !== 'manual') && freed < config.floorShare * used) {
-      if (!isOurs) return next(e)
-      return { skip: `Shake skipped: ~${Math.round(freed)} tokens to free, below the floor.` }
-    }
-    const savedPaths = await saveOriginals($, since, old)
-    if (savedPaths.size === 0) return isOurs ? { skip: 'Shake failed: no tool result could be saved.' } : next(e)
-    const messages = replaceResults(e.messages, savedPaths)
-    expectation = {
-      since,
-      toolIds: messages.flatMap(message => (message.toolResults ?? []).map(result => result.tool_use_id)),
-    }
-    isRepairPending = true
-    timeoutRetries = 0
-    retryAboveTokens = 0
-    const freedNow = freedTokens(old.filter(result => savedPaths.has(result.tool_use_id)))
-    const status = `Shook ${plural(savedPaths.size, 'tool result')} (~${Math.round(freedNow)} tokens freed).`
-    // After the compaction is drawn, so the line lands below it; prompt.submit waits for a repair still running.
-    $.clock.after(0, () => {
-      $.ui.log(status)
-      void repair($)
-    })
-    return { messages }
   })
 }

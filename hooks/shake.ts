@@ -12,10 +12,6 @@ export const CONFIG = {
 
 export type Config = typeof CONFIG
 
-export const SHAKE_INSTRUCTIONS = 'shake'
-export const AUTO_SHAKE_INSTRUCTIONS = 'shake auto'
-export const IDLE_SHAKE_INSTRUCTIONS = 'shake idle'
-
 const PREVIEW_CHARS = 500
 const PLACEHOLDER_OVERHEAD_CHARS = PREVIEW_CHARS + 300
 const SHAKEN_PREFIXES = ['[shaken:', '<persisted-output>', '<truncated-output>']
@@ -44,16 +40,6 @@ export const selectOld = (messages: readonly SessionMessage[], config: Config = 
 export const freedTokens = (old: readonly ToolResultSummary[], config: Config = CONFIG): number =>
   old.reduce((sum, result) => sum + Math.max(0, result.text.length - PLACEHOLDER_OVERHEAD_CHARS), 0) * config.tokensPerChar
 
-export const estimatedTokens = (messages: readonly SessionMessage[], config: Config = CONFIG): number =>
-  messages.reduce(
-    (sum, message) =>
-      sum +
-      message.text.length +
-      message.toolUses.reduce((n, use) => n + JSON.stringify(use.input).length, 0) +
-      (message.toolResults ?? []).reduce((n, result) => n + result.text.length, 0),
-    0,
-  ) * config.tokensPerChar
-
 const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
 
 export const preview = (text: string, maxChars: number = PREVIEW_CHARS): { text: string; hasMore: boolean } => {
@@ -77,20 +63,3 @@ export const placeholder = (path: string, text: string): string => {
     `Preview (first ${formatSize(PREVIEW_CHARS)}):\n${cut.text}${cut.hasMore ? '\n...\n' : '\n'}</persisted-output>`
   )
 }
-
-export const replaceResults = (
-  messages: readonly SessionMessage[],
-  savedPaths: ReadonlyMap<string, string>,
-): SessionMessage[] =>
-  messages.map(message => {
-    if (!message.toolResults?.some(result => savedPaths.has(result.tool_use_id))) return message
-    const { handle: _handle, ...rest } = message
-    return {
-      ...rest,
-      toolResults: message.toolResults.map(result => {
-        const path = savedPaths.get(result.tool_use_id)
-        if (path === undefined) return result
-        return { tool_use_id: result.tool_use_id, text: placeholder(path, result.text), isError: result.isError }
-      }),
-    }
-  })
